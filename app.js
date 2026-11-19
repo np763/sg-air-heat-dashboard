@@ -2,6 +2,7 @@
 
 const API = "https://api-open.data.gov.sg/v2/real-time/api/";
 const REFRESH_MS = 5 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 15000;
 const COLORS = { good: "#2e9e5b", mod: "#e0a100", bad: "#d9534f", vbad: "#8e44ad", none: "#7f8c8d" };
 
 const state = { data: {}, layer: "heat", user: null, trendRegion: "central" };
@@ -11,31 +12,44 @@ const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// data.gov.sg rate-limits keyless clients, so fetch politely and retry on 429-style errors.
+// data.gov.sg rate-limits keyless clients. Retry only transient failures (429, timeout, network);
+// real API errors (404, bad payload) fail fast. Every request has a timeout so a stall can't wedge load().
 async function getJSON(path, tries = 4) {
+  let lastErr;
   for (let i = 0; i < tries; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(API + path);
+      const res = await fetch(API + path, { signal: ctrl.signal });
       const body = await res.json().catch(() => null);
       if (res.ok && body && body.code === 0) return body.data;
-      if (!(res.status === 429 || (body && body.name === "TOO_MANY_REQUESTS"))) {
-        throw new Error((body && body.errorMsg) || "HTTP " + res.status);
+      if (res.status === 429 || (body && body.name === "TOO_MANY_REQUESTS")) {
+        lastErr = new Error("Rate limited");
+      } else {
+        const fatal = new Error((body && body.errorMsg) || "HTTP " + res.status);
+        fatal.fatal = true;
+        throw fatal;
       }
     } catch (e) {
-      if (i === tries - 1) throw e;
+      if (e.fatal) throw e;
+      lastErr = e; // timeout (AbortError) or network failure (TypeError): worth retrying
+    } finally {
+      clearTimeout(timer);
     }
-    await sleep(3000 * (i + 1));
+    if (i < tries - 1) await sleep(3000 * (i + 1));
   }
-  throw new Error("Rate limited");
+  throw lastErr;
 }
 
 function psiBand(v) {
+  if (v == null) return { label: "n/a", c: COLORS.none };
   if (v <= 50) return { label: "Good", c: COLORS.good };
   if (v <= 100) return { label: "Moderate", c: COLORS.mod };
   if (v <= 200) return { label: "Unhealthy", c: COLORS.bad };
   return { label: v <= 300 ? "Very unhealthy" : "Hazardous", c: COLORS.vbad };
 }
 function uvBand(v) {
+  if (v == null) return { label: "n/a", c: COLORS.none };
   if (v <= 2) return { label: "Low", c: COLORS.good };
   if (v <= 5) return { label: "Moderate", c: COLORS.mod };
   if (v <= 7) return { label: "High", c: "#e67e22" };
@@ -50,6 +64,7 @@ function heatBand(level) {
   return { label: level || "n/a", c: COLORS.none, rank: -1 };
 }
 function tempBand(t) {
+  if (t == null) return { label: "n/a", c: COLORS.none };
   if (t < 28) return { label: "Comfortable", c: COLORS.good };
   if (t < 31) return { label: "Warm", c: COLORS.mod };
   if (t < 34) return { label: "Hot", c: "#e67e22" };
@@ -141,8 +156,9 @@ function parseWbgt(d) {
 }
 function parseUv(d) {
   const rec = d.records[0];
+  // Before sunrise the index list can be empty: keep the dataset but with no current value.
   const hours = rec.index.map((h) => ({ hour: h.hour, value: h.value })).reverse();
-  return { hours, now: rec.index[0].value, time: rec.updatedTimestamp || rec.timestamp };
+  return { hours, now: rec.index.length ? rec.index[0].value : null, time: rec.updatedTimestamp || rec.timestamp };
 }
 
 /* ---------- rendering ---------- */
@@ -162,7 +178,8 @@ function renderCards() {
     const worst = psi.regions.reduce((a, b) => (b.psi > a.psi ? b : a));
     setCard("card-psi", worst.psi, psiBand(worst.psi), `Highest: ${worst.name} · PM2.5 ${worst.pm25} µg/m³`);
   } else setCard("card-psi", "–", null, "Unavailable");
-  if (uv) setCard("card-uv", uv.now, uvBand(uv.now), "Latest hourly reading");
+  if (uv && uv.now != null) setCard("card-uv", uv.now, uvBand(uv.now), "Latest hourly reading");
+  else if (uv) setCard("card-uv", "–", null, "No UV reading yet (before sunrise)");
   else setCard("card-uv", "–", null, "Unavailable");
   if (wbgt && wbgt.stations.length) {
     const worst = wbgt.stations.reduce((a, b) => (b.wbgt > a.wbgt ? b : a));
@@ -207,10 +224,13 @@ function renderTrend() {
   const psi = state.data.psi;
   if (!psi || psi.history.length < 2) { box.textContent = "Not enough PSI history yet today."; return; }
   const region = state.trendRegion;
-  const pts = psi.history.map((h) => ({ t: new Date(h.t), v: h.v[region] }));
+  const pts = psi.history.map((h) => ({ t: new Date(h.t), v: h.v[region] })).filter((p) => p.v != null);
+  if (pts.length < 2) { box.textContent = "Not enough PSI history yet today."; return; }
   const W = 600, H = 180, P = { l: 34, r: 22, t: 10, b: 24 };
   const max = Math.max(60, ...pts.map((p) => p.v));
-  const x = (i) => P.l + (i / (pts.length - 1)) * (W - P.l - P.r);
+  // Position by timestamp (not array index) so gaps in the data show up as gaps.
+  const t0 = pts[0].t.getTime(), span = pts[pts.length - 1].t.getTime() - t0 || 1;
+  const x = (i) => P.l + ((pts[i].t.getTime() - t0) / span) * (W - P.l - P.r);
   const y = (v) => P.t + (1 - v / max) * (H - P.t - P.b);
   const ns = "http://www.w3.org/2000/svg";
   const el = (n, a, txt) => { const e = document.createElementNS(ns, n); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; };
@@ -219,7 +239,7 @@ function renderTrend() {
     svg.append(el("line", { x1: P.l, x2: W - P.r, y1: y(v), y2: y(v), stroke: "currentColor", "stroke-opacity": ".2", "stroke-dasharray": "4 4" }));
     svg.append(el("text", { x: P.l - 4, y: y(v) + 4, "text-anchor": "end", "font-size": 11, fill: "currentColor", "fill-opacity": ".6" }, v));
   });
-  svg.append(el("polyline", { points: pts.map((p, i) => `${x(i)},${y(p.v)}`).join(" "), fill: "none", stroke: "#2a5db0", "stroke-width": 2.5, "stroke-linejoin": "round" }));
+  svg.append(el("polyline", { points: pts.map((p, i) => `${x(i)},${y(p.v)}`).join(" "), fill: "none", style: "stroke:var(--blue)", "stroke-width": 2.5, "stroke-linejoin": "round" }));
   pts.forEach((p, i) => {
     const c = el("circle", { cx: x(i), cy: y(p.v), r: 4, fill: psiBand(p.v).c });
     c.append(el("title", {}, `${fmtTime(p.t)}: PSI ${p.v}`));
@@ -249,7 +269,7 @@ function renderAdvice() {
     if (r >= 2) { sev = 2; tips.push("High heat stress: avoid strenuous outdoor activity, rest in shade and hydrate often."); }
     else if (r === 1) { sev = Math.max(sev, 1); tips.push("Moderate heat stress: take regular breaks and drink water if you're exercising outdoors."); }
   }
-  if (uv && uv.now >= 6) { sev = Math.max(sev, 1); tips.push(`UV is ${uvBand(uv.now).label.toLowerCase()} (${uv.now}): sunscreen, hat and shade.`); }
+  if (uv && uv.now != null && uv.now >= 6) { sev = Math.max(sev, 1); tips.push(`UV is ${uvBand(uv.now).label.toLowerCase()} (${uv.now}): sunscreen, hat and shade.`); }
   const el = $("advice");
   el.className = "advice " + ["good", "mod", "bad"][sev];
   if (!psi && !uv && !wbgt) { el.className = "advice"; el.textContent = "Couldn't load live data. Try Refresh in a moment."; return; }
@@ -261,6 +281,7 @@ function renderUv() {
   box.replaceChildren();
   const uv = state.data.uv;
   if (!uv) { box.textContent = "UV data unavailable."; return; }
+  if (!uv.hours.length) { box.textContent = "No UV readings yet today."; return; }
   const max = Math.max(11, ...uv.hours.map((h) => h.value));
   for (const h of uv.hours) {
     const bar = document.createElement("div");
@@ -375,9 +396,14 @@ function renderNear() {
   h.textContent = "Near you";
   const ul = document.createElement("ul");
   const add = (txt) => { const li = document.createElement("li"); li.textContent = txt; ul.append(li); };
-  if (wbgt) { const n = nearest(wbgt.stations, u); add(`Heat stress: ${heatBand(n.s.level).label} (WBGT ${n.s.wbgt}°C) at ${n.s.name}, ${n.d.toFixed(1)} km away`); }
-  if (temp) { const n = nearest(temp.stations, u); add(`Temperature: ${n.s.temp}°C at ${n.s.name}, ${n.d.toFixed(1)} km away`); }
-  if (psi) { const n = nearest(psi.regions, u); add(`Air quality (${n.s.name} region): PSI ${n.s.psi}, ${psiBand(n.s.psi).label}`); }
+  // nearest() returns null for an empty list, so guard each lookup.
+  const nW = wbgt && nearest(wbgt.stations, u);
+  if (nW) add(`Heat stress: ${heatBand(nW.s.level).label} (WBGT ${nW.s.wbgt}°C) at ${nW.s.name}, ${nW.d.toFixed(1)} km away`);
+  const nT = temp && nearest(temp.stations, u);
+  if (nT) add(`Temperature: ${nT.s.temp}°C at ${nT.s.name}, ${nT.d.toFixed(1)} km away`);
+  const nP = psi && nearest(psi.regions, u);
+  if (nP) add(`Air quality (${nP.s.name} region): PSI ${nP.s.psi}, ${psiBand(nP.s.psi).label}`);
+  if (!ul.children.length) add("No nearby readings available yet.");
   box.append(h, ul);
   box.hidden = false;
 }
@@ -409,7 +435,7 @@ async function load() {
       console.warn(key, e);
       errors.push(key);
     }
-    renderAll();
+    renderFor(key);
     await sleep(600); // be gentle with the keyless rate limit
   }
   const times = ["psi", "uv", "wbgt", "temp", "hum", "rain"].map((k) => state.data[k] && state.data[k].time).filter(Boolean);
@@ -421,14 +447,16 @@ async function load() {
   loading = false;
 }
 
-function renderAll() {
-  enrichTemp();
+// Re-render only what the dataset that just arrived can change.
+const LAYER_KEYS = { heat: ["wbgt"], temp: ["temp", "hum"], rain: ["rain"], psi: ["psi"] };
+function renderFor(key) {
+  if (key === "temp" || key === "hum") enrichTemp();
   renderCards();
-  renderTrend();
   renderAdvice();
-  renderUv();
-  renderMap();
-  renderNear();
+  if (key === "psi") renderTrend();
+  if (key === "uv") renderUv();
+  if (LAYER_KEYS[state.layer].includes(key)) renderMap();
+  if (["psi", "wbgt", "temp"].includes(key)) renderNear();
 }
 
 /* ---------- wire up ---------- */
