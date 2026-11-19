@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SG Air &amp; Heat Dashboard</title>
+  <meta name="description" content="Live air quality (PSI), UV, temperature and heat stress across Singapore, from data.gov.sg.">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>🍌 Bello! Island Air &amp; Heat</h1>
+      <p class="sub">Banana-fresh conditions across Singapore · <span id="updated">loading…</span></p>
+    </div>
+    <div class="actions">
+      <button id="locate" type="button">📍 Near me</button>
+      <button id="refresh" type="button">↻ Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="advice" class="advice" aria-live="polite">Fetching the latest readings…</section>
+
+    <section id="cards" class="cards">
+      <article class="card" id="card-psi"><h2>PSI (24h)</h2><div class="big">–</div><div class="tag"></div><div class="note"></div></article>
+      <article class="card" id="card-uv"><h2>UV index</h2><div class="big">–</div><div class="tag"></div><div class="note"></div></article>
+      <article class="card" id="card-heat"><h2>Heat stress (WBGT)</h2><div class="big">–</div><div class="tag"></div><div class="note"></div></article>
+      <article class="card" id="card-temp"><h2>Air temperature</h2><div class="big">–</div><div class="tag"></div><div class="note"></div></article>
+      <article class="card" id="card-feels"><h2>Feels like</h2><div class="big">–</div><div class="tag"></div><div class="note"></div></article>
+      <article class="card" id="card-rain"><h2>Rain now</h2><div class="big">–</div><div class="tag"></div><div class="note"></div></article>
+    </section>
+
+    <section id="near" class="near" hidden></section>
+
+    <section class="map-wrap">
+      <div class="tabs" role="tablist">
+        <button role="tab" data-layer="heat" aria-selected="true">Heat stress</button>
+        <button role="tab" data-layer="temp" aria-selected="false">Temperature</button>
+        <button role="tab" data-layer="rain" aria-selected="false">Rainfall</button>
+        <button role="tab" data-layer="psi" aria-selected="false">Air quality</button>
+      </div>
+      <div id="map" aria-label="Map of Singapore with live readings"></div>
+      <div id="legend" class="legend"></div>
+    </section>
+
+    <section class="uv-wrap">
+      <div class="trend-head">
+        <h2>PSI today (24h reading)</h2>
+        <label>Region
+          <select id="trend-region">
+            <option value="central" selected>Central</option>
+            <option value="north">North</option>
+            <option value="south">South</option>
+            <option value="east">East</option>
+            <option value="west">West</option>
+          </select>
+        </label>
+      </div>
+      <div id="trend" class="trend"></div>
+    </section>
+
+    <section class="uv-wrap">
+      <h2>UV today (hourly)</h2>
+      <div id="uvchart" class="uvchart"></div>
+    </section>
+  </main>
+
+  <footer>
+    Data: <a href="https://data.gov.sg">data.gov.sg</a> real-time APIs (NEA), under the
+    <a href="https://data.gov.sg/open-data-licence">Singapore Open Data Licence</a>. Refreshes every 5 minutes.
+    Informational only, not official health advice. Minions-inspired colour theme: this is an unofficial fan-style
+    design and isn't affiliated with Illumination or Universal.
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
